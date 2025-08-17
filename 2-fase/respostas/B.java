@@ -57,68 +57,72 @@ public class B {
      */
 
 
-    private static int toIdx(char c) {
-        return switch (c) {
-            case '*' -> 0; // pedra
-            case 'O' -> 1; // papel
-            case 'V' -> 2; // tesoura
-            default -> throw new IllegalArgumentException("movimento inválido: " + c);
-        };
-    }
+    enum Move {
+        ROCK('*'), PAPER('O'), SCISSORS('V');
 
-    record CaseData(List<String> lines, boolean hasSentinel) {}
+        final char code;
 
-    private static String decideWinner(CaseData data) {
-        if (!data.hasSentinel) return "INVALID";
-
-        int beatriz = 0, artur = 0;
-        for (String line : data.lines) {
-            String s = line.trim();
-            if (s.isEmpty()) continue;
-            if (s.equals("- -")) break;
-
-            String[] p = s.split("\\s+");
-            if (p.length < 2) continue;
-            if (p[0].equals("-") && p[1].equals("-")) break;
-
-            int b = toIdx(p[0].charAt(0));
-            int a = toIdx(p[1].charAt(0));
-            if (b == a) continue;
-
-            int diff = (b - a + 3) % 3; // 0 empate, 1 B vence, 2 A vence
-            if (diff == 1) beatriz++; else artur++;
+        Move(char code) {
+            this.code = code;
         }
-        if (beatriz > artur) return "BEATRIZ WIN";
-        if (artur > beatriz) return "ARTUR WIN";
-        return "TIE";
+
+        static Move from(char c) {
+            return switch (c) {
+                case '*' -> ROCK;
+                case 'O' -> PAPER;
+                case 'V' -> SCISSORS;
+                default -> throw new IllegalArgumentException("movimento inválido: " + c);
+            };
+        }
+
+        int vs(Move other) {
+            if (this == other) return 0;
+            int a = ordinal(), b = other.ordinal();
+            int diff = (a - b + 3) % 3;
+            return (diff == 1) ? +1 : -1;
+        }
     }
 
-    private static CaseData extractCase(JsonNode node) {
+    record CaseData(List<String> roundsBA, boolean hasSentinel) {
+    }
+
+    static Path resolveJsonPath(String[] args) throws IOException {
+        if (args != null && args.length > 0 && !args[0].isBlank()) {
+            return Path.of(args[0]).toRealPath();
+        }
+        Path rel = Path.of("2-fase", "respostas", "inputs", "b-inputs.json");
+        Path cwd = Path.of("").toAbsolutePath().normalize();
+        for (Path p = cwd; p != null; p = p.getParent()) {
+            Path candidate = p.resolve(rel).normalize();
+            if (exists(candidate)) return candidate.toRealPath();
+        }
+        throw new NoSuchFileException("Não encontrei o JSON: " + rel);
+    }
+
+    static String normalizeRound(JsonNode node) {
+        if (node.isTextual()) return node.asText();
+        if (node.isArray() && node.size() >= 2) return node.get(0).asText() + " " + node.get(1).asText();
+        if (node.isObject()) {
+            String b = node.path("b").asText(null);
+            String a = node.path("a").asText(null);
+            if (b != null && a != null) return b + " " + a;
+        }
+        return null;
+    }
+
+    static CaseData readCase(JsonNode node) {
         List<String> out = new ArrayList<>();
         boolean saw = false;
 
-        if (node == null || node.isNull()) return new CaseData(out, false);
-
         if (node.isArray()) {
             for (JsonNode el : node) {
-                if (saw) break;
-                if (el.isTextual()) {
-                    String s = el.asText();
-                    out.add(s);
-                    if (s.trim().equals("- -")) saw = true;
-                } else if (el.isArray() && el.size() >= 2) {
-                    String b = el.get(0).asText();
-                    String a = el.get(1).asText();
-                    out.add(b + " " + a);
-                    if (b.equals("-") && a.equals("-")) saw = true;
-                } else if (el.isObject()) {
-                    String b = el.path("b").asText(null);
-                    String a = el.path("a").asText(null);
-                    if (b != null && a != null) {
-                        out.add(b + " " + a);
-                        if (b.equals("-") && a.equals("-")) saw = true;
-                    }
+                String s = normalizeRound(el);
+                if (s == null || s.isBlank()) continue;
+                if (isSentinelLine(s)) {
+                    saw = true;
+                    break;
                 }
+                out.add(s);
             }
             return new CaseData(out, saw);
         }
@@ -126,69 +130,76 @@ public class B {
         if (node.isObject()) {
             for (String key : new String[]{"rounds", "lines", "moves"}) {
                 JsonNode arr = node.get(key);
-                if (arr != null && arr.isArray()) return extractCase(arr);
+                if (arr != null && arr.isArray()) return readCase(arr);
             }
-            String b = node.path("b").asText(null);
-            String a = node.path("a").asText(null);
-            if (b != null && a != null) out.add(b + " " + a);
+            String s = normalizeRound(node);
+            if (s != null) out.add(s);
             return new CaseData(out, false);
         }
 
-        throw new IllegalArgumentException("JSON de entrada não suportado.");
+        throw new IllegalArgumentException("JSON de entrada não suportado para um caso.");
     }
 
-    /** Encontra a lista de casos na raiz, sem usar JsonNode.fields() (depreca em versões novas) */
-    private static List<CaseData> parseCases(JsonNode root) {
-        List<CaseData> casesOut = new ArrayList<>();
+    static List<CaseData> readAllCases(JsonNode root) {
+        List<CaseData> cases = new ArrayList<>();
+
         if (root.isArray()) {
-            for (JsonNode c : root) casesOut.add(extractCase(c));
-            return casesOut;
+            for (JsonNode c : root) cases.add(readCase(c));
+            return cases;
         }
+
         if (root.isObject()) {
             JsonNode casesNode = root.get("cases");
             if (casesNode != null && casesNode.isArray()) {
-                for (JsonNode c : casesNode) casesOut.add(extractCase(c));
-                return casesOut;
+                for (JsonNode c : casesNode) cases.add(readCase(c));
+                return cases;
             }
-            // procurar 1º campo array (usando fieldNames, não fields())
             for (Iterator<String> it = root.fieldNames(); it.hasNext(); ) {
                 String name = it.next();
                 JsonNode v = root.get(name);
                 if (v != null && v.isArray()) {
-                    for (JsonNode c : v) casesOut.add(extractCase(c));
-                    if (!casesOut.isEmpty()) return casesOut;
+                    for (JsonNode c : v) cases.add(readCase(c));
+                    if (!cases.isEmpty()) return cases;
                 }
             }
-            // caso único
-            casesOut.add(extractCase(root));
-            return casesOut;
+            cases.add(readCase(root));
+            return cases;
         }
+
         throw new IllegalArgumentException("JSON de entrada não suportado.");
     }
 
-    static Path resolveJsonPath(String[] args) throws IOException {
-        if (args != null && args.length > 0 && !args[0].isBlank()) {
-            return Path.of(args[0]).toRealPath(); // valida + resolve symlinks
+    static boolean isSentinelLine(String s) {
+        String[] p = s.trim().split("\\s+");
+        return p.length >= 2 && p[0].equals("-") && p[1].equals("-");
+    }
+
+    static String decideWinner(CaseData data) {
+        if (!data.hasSentinel) return "INVALID";
+
+        int beatriz = 0, artur = 0;
+        for (String line : data.roundsBA) {
+            String[] p = line.split("\\s+");
+            if (p.length < 2) continue;
+            Move b = Move.from(p[0].charAt(0));
+            Move a = Move.from(p[1].charAt(0));
+            int r = b.vs(a);
+            if (r > 0) beatriz++;
+            else if (r < 0) artur++;
         }
-        Path rel = Path.of("2-fase", "respostas", "inputs", "b-inputs.json");
-        Path cwd = Path.of("").toAbsolutePath().normalize();
-        for (Path p = cwd; p != null; p = p.getParent()) {
-            Path candidate = p.resolve(rel).normalize();
-            if (exists(candidate)) {
-                return candidate.toRealPath();
-            }
-        }
-        throw new NoSuchFileException("Não encontrei o JSON: " + rel);
+        if (beatriz > artur) return "BEATRIZ WIN";
+        if (artur > beatriz) return "ARTUR WIN";
+        return "TIE";
     }
 
     public static void main(String[] args) throws Exception {
         Path path = resolveJsonPath(args);
         ObjectMapper om = new ObjectMapper();
         JsonNode root = om.readTree(newBufferedReader(path));
+        List<CaseData> cases = readAllCases(root);
 
-        List<CaseData> cases = parseCases(root);
         StringBuilder out = new StringBuilder();
-        for (CaseData oneCase : cases) out.append(decideWinner(oneCase)).append('\n');
+        for (CaseData c : cases) out.append(decideWinner(c)).append('\n');
         System.out.print(out);
     }
 }
